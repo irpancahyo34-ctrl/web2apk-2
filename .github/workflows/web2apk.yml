@@ -1,0 +1,135 @@
+name: Build Web to APK
+
+on:
+  workflow_dispatch:
+    inputs:
+      web_url:
+        description: 'URL website'
+        required: true
+      app_name:
+        description: 'Nama aplikasi'
+        required: true
+      icon_url:
+        description: 'URL icon (PNG)'
+        required: true
+      tag:
+        description: 'Tag build'
+        required: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+
+    steps:
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'zulu'
+          java-version: '17'
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.24.0'
+          channel: 'stable'
+          cache: true
+
+      - name: Download icon
+        run: |
+          curl -L -o icon.png "${{ github.event.inputs.icon_url }}"
+          ls -lh icon.png
+
+      - name: Create Flutter project
+        run: |
+          flutter create --org com.web2apk --project-name webapp webapp
+
+      - name: Add webview_flutter
+        working-directory: webapp
+        run: |
+          flutter pub add webview_flutter
+          flutter pub add flutter_launcher_icons --dev
+
+      - name: Replace main.dart
+        working-directory: webapp
+        run: |
+          cat > lib/main.dart << 'DART_EOF'
+          import 'package:flutter/material.dart';
+          import 'package:webview_flutter/webview_flutter.dart';
+
+          void main() => runApp(const MyApp());
+
+          class MyApp extends StatelessWidget {
+            const MyApp({super.key});
+            @override
+            Widget build(BuildContext context) {
+              return MaterialApp(
+                title: '${{ github.event.inputs.app_name }}',
+                debugShowCheckedModeBanner: false,
+                home: const WebViewPage(),
+              );
+            }
+          }
+
+          class WebViewPage extends StatefulWidget {
+            const WebViewPage({super.key});
+            @override
+            State<WebViewPage> createState() => _WebViewPageState();
+          }
+
+          class _WebViewPageState extends State<WebViewPage> {
+            late final WebViewController controller;
+            @override
+            void initState() {
+              super.initState();
+              controller = WebViewController()
+                ..setJavaScriptMode(JavaScriptMode.unrestricted)
+                ..loadRequest(Uri.parse('${{ github.event.inputs.web_url }}'));
+            }
+            @override
+            Widget build(BuildContext context) {
+              return Scaffold(body: SafeArea(child: WebViewWidget(controller: controller)));
+            }
+          }
+          DART_EOF
+
+      - name: Setup icon
+        working-directory: webapp
+        run: |
+          mkdir -p assets
+          cp ../icon.png assets/icon.png
+          cat > flutter_launcher_icons.yaml << 'YAML_EOF'
+          flutter_launcher_icons:
+            android: true
+            ios: false
+            image_path: "assets/icon.png"
+            adaptive_icon_background: "#ffffff"
+            adaptive_icon_foreground: "assets/icon.png"
+          YAML_EOF
+
+      - name: Rename app
+        working-directory: webapp
+        run: |
+          sed -i 's/android:label="webapp"/android:label="${{ github.event.inputs.app_name }}"/' android/app/src/main/AndroidManifest.xml
+
+      - name: Pub get
+        working-directory: webapp
+        run: flutter pub get
+
+      - name: Generate icons
+        working-directory: webapp
+        run: flutter pub run flutter_launcher_icons
+
+      - name: Build APK
+        working-directory: webapp
+        run: flutter build apk --release --no-pub
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: apk-${{ github.event.inputs.tag }}
+          path: webapp/build/app/outputs/flutter-apk/app-release.apk
+          if-no-files-found: error
+          retention-days: 7
