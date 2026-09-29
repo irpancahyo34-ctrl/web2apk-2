@@ -4,132 +4,168 @@ on:
   workflow_dispatch:
     inputs:
       web_url:
-        description: 'URL website'
+        description: 'URL website (http/https)'
         required: true
+        type: string
       app_name:
         description: 'Nama aplikasi'
         required: true
+        type: string
       icon_url:
-        description: 'URL icon (PNG)'
+        description: 'URL icon (PNG/JPG)'
         required: true
+        type: string
       tag:
-        description: 'Tag build'
+        description: 'Build tag'
         required: true
+        type: string
 
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
-    permissions:
-      contents: read
 
     steps:
-      - name: Setup Java
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Setup Java 17
         uses: actions/setup-java@v4
         with:
-          distribution: 'zulu'
+          distribution: 'temurin'
           java-version: '17'
 
-      - name: Setup Flutter
-        uses: subosito/flutter-action@v2
-        with:
-          flutter-version: '3.24.0'
-          channel: 'stable'
-          cache: true
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
 
-      - name: Download icon
+      - name: Validate URL & normalize
+        id: url
         run: |
-          curl -L -o icon.png "${{ github.event.inputs.icon_url }}"
-          ls -lh icon.png
+          RAW_URL="${{ inputs.web_url }}"
+          # Auto-prepend https:// kalau user kirim tanpa protokol
+          if [[ ! "$RAW_URL" =~ ^https?:// ]]; then
+            RAW_URL="https://$RAW_URL"
+          fi
+          # Validasi format URL
+          if ! echo "$RAW_URL" | grep -qE '^https?://[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}'; then
+            echo "❌ URL tidak valid: $RAW_URL"
+            exit 1
+          fi
+          echo "url=$RAW_URL" >> $GITHUB_OUTPUT
+          echo "✅ URL valid: $RAW_URL"
 
-      - name: Create Flutter project
+      - name: Create Capacitor project
         run: |
-          flutter create --org com.web2apk --project-name webapp webapp
+          mkdir -p www
+          cat > package.json <<'EOF'
+          {
+            "name": "web2app",
+            "version": "1.0.0",
+            "private": true
+          }
+          EOF
 
-      - name: Add webview_flutter
-        working-directory: webapp
+          npm install @capacitor/core@6 @capacitor/cli@6 @capacitor/android@6
+
+      - name: Generate Capacitor config
         run: |
-          flutter pub add webview_flutter
-          flutter pub add flutter_launcher_icons --dev
-
-      - name: Replace main.dart
-        working-directory: webapp
-        run: |
-          cat > lib/main.dart << 'DART_EOF'
-          import 'package:flutter/material.dart';
-          import 'package:webview_flutter/webview_flutter.dart';
-
-          void main() => runApp(const MyApp());
-
-          class MyApp extends StatelessWidget {
-            const MyApp({super.key});
-            @override
-            Widget build(BuildContext context) {
-              return MaterialApp(
-                title: '${{ github.event.inputs.app_name }}',
-                debugShowCheckedModeBanner: false,
-                home: const WebViewPage(),
-              );
+          cat > capacitor.config.json <<EOF
+          {
+            "appId": "com.web2app.${{ github.run_id }}",
+            "appName": "${{ inputs.app_name }}",
+            "webDir": "www",
+            "server": {
+              "url": "${{ steps.url.outputs.url }}",
+              "androidScheme": "https",
+              "cleartext": true,
+              "allowNavigation": ["*"]
+            },
+            "android": {
+              "allowMixedContent": true
             }
           }
+          EOF
+          cat capacitor.config.json
 
-          class WebViewPage extends StatefulWidget {
-            const WebViewPage({super.key});
-            @override
-            State<WebViewPage> createState() => _WebViewPageState();
-          }
-
-          class _WebViewPageState extends State<WebViewPage> {
-            late final WebViewController controller;
-            @override
-            void initState() {
-              super.initState();
-              controller = WebViewController()
-                ..setJavaScriptMode(JavaScriptMode.unrestricted)
-                ..loadRequest(Uri.parse('${{ github.event.inputs.web_url }}'));
-            }
-            @override
-            Widget build(BuildContext context) {
-              return Scaffold(body: SafeArea(child: WebViewWidget(controller: controller)));
-            }
-          }
-          DART_EOF
-
-      - name: Setup icon
-        working-directory: webapp
+      - name: Generate index.html (fallback)
         run: |
-          mkdir -p assets
-          cp ../icon.png assets/icon.png
-          cat > flutter_launcher_icons.yaml << 'YAML_EOF'
-          flutter_launcher_icons:
-            android: true
-            ios: false
-            image_path: "assets/icon.png"
-            adaptive_icon_background: "#ffffff"
-            adaptive_icon_foreground: "assets/icon.png"
-          YAML_EOF
+          cat > www/index.html <<EOF
+          <!DOCTYPE html>
+          <html>
+          <head>
+            <meta charset="utf-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+            <title>${{ inputs.app_name }}</title>
+            <meta http-equiv="refresh" content="0; url=${{ steps.url.outputs.url }}">
+          </head>
+          <body>
+            <script>window.location.href = "${{ steps.url.outputs.url }}";</script>
+          </body>
+          </html>
+          EOF
 
-      - name: Rename app
-        working-directory: webapp
+      - name: Add Android platform
+        run: npx cap add android
+
+      - name: Sync Capacitor
+        run: npx cap sync android
+
+      - name: Download & apply icon
         run: |
-          sed -i 's/android:label="webapp"/android:label="${{ github.event.inputs.app_name }}"/' android/app/src/main/AndroidManifest.xml
+          ICON_URL="${{ inputs.icon_url }}"
+          mkdir -p /tmp/icon
+          curl -fsSL "$ICON_URL" -o /tmp/icon/icon.png || {
+            echo "⚠️ Gagal download icon, pakai default"
+            exit 0
+          }
+          # Cek file valid (image)
+          file /tmp/icon/icon.png || true
 
-      - name: Pub get
-        working-directory: webapp
-        run: flutter pub get
+          # Override icon di semua density Android
+          for density in mdpi hdpi xhdpi xxhdpi xxxhdpi; do
+            DIR="android/app/src/main/res/mipmap-$density"
+            mkdir -p "$DIR"
+            # Pakai ImageMagick untuk resize
+            convert /tmp/icon/icon.png -resize 512x512 "$DIR/ic_launcher.png" 2>/dev/null || \
+            cp /tmp/icon/icon.png "$DIR/ic_launcher.png"
+            cp "$DIR/ic_launcher.png" "$DIR/ic_launcher_round.png" 2>/dev/null || true
+          done
 
-      - name: Generate icons
-        working-directory: webapp
-        run: flutter pub run flutter_launcher_icons
+      - name: Patch AndroidManifest (cleartext + INTERNET)
+        run: |
+          MANIFEST="android/app/src/main/AndroidManifest.xml"
+          # Tambah INTERNET permission kalau belum ada
+          if ! grep -q "android.permission.INTERNET" "$MANIFEST"; then
+            sed -i 's|<application|<uses-permission android:name="android.permission.INTERNET" />\n    <application|' "$MANIFEST"
+          fi
+          # Enable cleartext traffic
+          if ! grep -q "usesCleartextTraffic" "$MANIFEST"; then
+            sed -i 's|<application|<application android:usesCleartextTraffic="true"|' "$MANIFEST"
+          fi
+          cat "$MANIFEST"
 
-      - name: Build APK
-        working-directory: webapp
-        run: flutter build apk --release --no-pub
+      - name: Grant gradlew permission
+        run: chmod +x android/gradlew
 
-      - name: Upload APK
+      - name: Build Debug APK
+        working-directory: android
+        run: ./gradlew assembleDebug --no-daemon --stacktrace
+
+      - name: Rename APK
+        run: |
+          SAFE_NAME=$(echo "${{ inputs.app_name }}" | tr ' ' '_' | tr -cd '[:alnum:]_-')
+          mkdir -p output
+          cp android/app/build/outputs/apk/debug/app-debug.apk \
+             "output/${SAFE_NAME}-${{ inputs.tag }}.apk"
+          ls -lh output/
+
+      - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: apk-${{ github.event.inputs.tag }}
-          path: webapp/build/app/outputs/flutter-apk/app-release.apk
-          if-no-files-found: error
+          name: apk-${{ inputs.tag }}
+          path: output/*.apk
           retention-days: 7
