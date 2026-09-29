@@ -46,12 +46,13 @@ jobs:
           echo "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin" >> $GITHUB_PATH
           echo "$ANDROID_SDK_ROOT/platform-tools" >> $GITHUB_PATH
 
-      - name: Install Android platform & build-tools
+      - name: Install Android SDK + ImageMagick
         run: |
           yes | sdkmanager --licenses > /dev/null 2>&1 || true
           sdkmanager "platform-tools" "platforms;android-34" "build-tools;34.0.0" || true
+          sudo apt-get install -y imagemagick > /dev/null 2>&1 || true
 
-      - name: Validate URL & normalize
+      - name: Validate URL
         id: url
         run: |
           RAW_URL="${{ inputs.web_url }}"
@@ -77,13 +78,11 @@ jobs:
           EOF
           npm install @capacitor/core@6 @capacitor/cli@6 @capacitor/android@6
 
-      # ✅ FIX: appId dengan hash valid (bukan cuma angka)
       - name: Generate Capacitor config
         run: |
           HASH=$(echo "${{ github.run_id }}-${{ inputs.tag }}" | md5sum | cut -c1-8)
           APP_ID="com.web2app.a${HASH}"
           echo "📱 App ID: $APP_ID"
-
           cat > capacitor.config.json <<EOF
           {
             "appId": "${APP_ID}",
@@ -125,25 +124,49 @@ jobs:
       - name: Sync Capacitor
         run: npx cap sync android
 
-      - name: Download & apply icon
+      - name: Download & apply icon (full replace)
         run: |
           ICON_URL="${{ inputs.icon_url }}"
           mkdir -p /tmp/icon
-          curl -fsSL "$ICON_URL" -o /tmp/icon/icon.png || {
-            echo "⚠️ Gagal download icon, pakai default"
+
+          if ! curl -fsSL "$ICON_URL" -o /tmp/icon/original; then
+            echo "⚠️ Gagal download icon, skip"
             exit 0
-          }
-          file /tmp/icon/icon.png || true
+          fi
+          file /tmp/icon/original
+
+          convert /tmp/icon/original -resize 512x512! /tmp/icon/icon.png 2>/dev/null || \
+            cp /tmp/icon/original /tmp/icon/icon.png
+
+          convert /tmp/icon/icon.png -resize 340x340 -background none \
+            -gravity center -extent 512x512 /tmp/icon/foreground.png 2>/dev/null || \
+            cp /tmp/icon/icon.png /tmp/icon/foreground.png
+
+          convert -size 512x512 xc:white /tmp/icon/background.png 2>/dev/null || \
+            cp /tmp/icon/icon.png /tmp/icon/background.png
+
+          RES="android/app/src/main/res"
 
           for density in mdpi hdpi xhdpi xxhdpi xxxhdpi; do
-            DIR="android/app/src/main/res/mipmap-$density"
+            DIR="$RES/mipmap-$density"
             mkdir -p "$DIR"
-            convert /tmp/icon/icon.png -resize 512x512 "$DIR/ic_launcher.png" 2>/dev/null || \
             cp /tmp/icon/icon.png "$DIR/ic_launcher.png"
-            cp "$DIR/ic_launcher.png" "$DIR/ic_launcher_round.png" 2>/dev/null || true
+            cp /tmp/icon/icon.png "$DIR/ic_launcher_round.png"
+            cp /tmp/icon/foreground.png "$DIR/ic_launcher_foreground.png"
+            cp /tmp/icon/background.png "$DIR/ic_launcher_background.png"
           done
 
-      - name: Patch AndroidManifest (cleartext + INTERNET)
+          mkdir -p "$RES/drawable"
+          cp /tmp/icon/icon.png "$RES/drawable/ic_launcher.png" 2>/dev/null || true
+          cp /tmp/icon/foreground.png "$RES/drawable/ic_launcher_foreground.png" 2>/dev/null || true
+
+          rm -rf "$RES/mipmap-anydpi-v26"
+          echo "🗑️ Adaptive XML dihapus"
+
+          echo "📦 Icon terpasang:"
+          find "$RES" -name "ic_launcher*" -exec ls -lh {} \; | head -30
+
+      - name: Patch AndroidManifest
         run: |
           MANIFEST="android/app/src/main/AndroidManifest.xml"
           if ! grep -q "android.permission.INTERNET" "$MANIFEST"; then
