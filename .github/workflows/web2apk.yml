@@ -39,18 +39,14 @@ jobs:
           distribution: 'temurin'
           java-version: '17'
 
-      # ✅ Ganti setup-android@v3 dengan ini — pakai SDK pre-installed
-      - name: Setup Android SDK (manual, tanpa error)
+      - name: Setup Android SDK
         run: |
           echo "ANDROID_HOME=$ANDROID_SDK_ROOT" >> $GITHUB_ENV
           echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT" >> $GITHUB_ENV
           echo "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin" >> $GITHUB_PATH
           echo "$ANDROID_SDK_ROOT/platform-tools" >> $GITHUB_PATH
-          echo "✅ Android SDK: $ANDROID_SDK_ROOT"
-          ls $ANDROID_SDK_ROOT || true
 
-      # Optional: install platform yang dibutuhkan (tanpa 'tools')
-      - name: Install Android platform 34 + build-tools
+      - name: Install Android platform & build-tools
         run: |
           yes | sdkmanager --licenses > /dev/null 2>&1 || true
           sdkmanager "platform-tools" "platforms;android-34" "build-tools;34.0.0" || true
@@ -81,11 +77,16 @@ jobs:
           EOF
           npm install @capacitor/core@6 @capacitor/cli@6 @capacitor/android@6
 
+      # ✅ FIX: appId dengan hash valid (bukan cuma angka)
       - name: Generate Capacitor config
         run: |
+          HASH=$(echo "${{ github.run_id }}-${{ inputs.tag }}" | md5sum | cut -c1-8)
+          APP_ID="com.web2app.a${HASH}"
+          echo "📱 App ID: $APP_ID"
+
           cat > capacitor.config.json <<EOF
           {
-            "appId": "com.web2app.${{ github.run_id }}",
+            "appId": "${APP_ID}",
             "appName": "${{ inputs.app_name }}",
             "webDir": "www",
             "server": {
