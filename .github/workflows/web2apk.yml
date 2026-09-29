@@ -39,18 +39,29 @@ jobs:
           distribution: 'temurin'
           java-version: '17'
 
-      - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
+      # ✅ Ganti setup-android@v3 dengan ini — pakai SDK pre-installed
+      - name: Setup Android SDK (manual, tanpa error)
+        run: |
+          echo "ANDROID_HOME=$ANDROID_SDK_ROOT" >> $GITHUB_ENV
+          echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT" >> $GITHUB_ENV
+          echo "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin" >> $GITHUB_PATH
+          echo "$ANDROID_SDK_ROOT/platform-tools" >> $GITHUB_PATH
+          echo "✅ Android SDK: $ANDROID_SDK_ROOT"
+          ls $ANDROID_SDK_ROOT || true
+
+      # Optional: install platform yang dibutuhkan (tanpa 'tools')
+      - name: Install Android platform 34 + build-tools
+        run: |
+          yes | sdkmanager --licenses > /dev/null 2>&1 || true
+          sdkmanager "platform-tools" "platforms;android-34" "build-tools;34.0.0" || true
 
       - name: Validate URL & normalize
         id: url
         run: |
           RAW_URL="${{ inputs.web_url }}"
-          # Auto-prepend https:// kalau user kirim tanpa protokol
           if [[ ! "$RAW_URL" =~ ^https?:// ]]; then
             RAW_URL="https://$RAW_URL"
           fi
-          # Validasi format URL
           if ! echo "$RAW_URL" | grep -qE '^https?://[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}'; then
             echo "❌ URL tidak valid: $RAW_URL"
             exit 1
@@ -68,7 +79,6 @@ jobs:
             "private": true
           }
           EOF
-
           npm install @capacitor/core@6 @capacitor/cli@6 @capacitor/android@6
 
       - name: Generate Capacitor config
@@ -91,7 +101,7 @@ jobs:
           EOF
           cat capacitor.config.json
 
-      - name: Generate index.html (fallback)
+      - name: Generate index.html
         run: |
           cat > www/index.html <<EOF
           <!DOCTYPE html>
@@ -122,14 +132,11 @@ jobs:
             echo "⚠️ Gagal download icon, pakai default"
             exit 0
           }
-          # Cek file valid (image)
           file /tmp/icon/icon.png || true
 
-          # Override icon di semua density Android
           for density in mdpi hdpi xhdpi xxhdpi xxxhdpi; do
             DIR="android/app/src/main/res/mipmap-$density"
             mkdir -p "$DIR"
-            # Pakai ImageMagick untuk resize
             convert /tmp/icon/icon.png -resize 512x512 "$DIR/ic_launcher.png" 2>/dev/null || \
             cp /tmp/icon/icon.png "$DIR/ic_launcher.png"
             cp "$DIR/ic_launcher.png" "$DIR/ic_launcher_round.png" 2>/dev/null || true
@@ -138,11 +145,9 @@ jobs:
       - name: Patch AndroidManifest (cleartext + INTERNET)
         run: |
           MANIFEST="android/app/src/main/AndroidManifest.xml"
-          # Tambah INTERNET permission kalau belum ada
           if ! grep -q "android.permission.INTERNET" "$MANIFEST"; then
             sed -i 's|<application|<uses-permission android:name="android.permission.INTERNET" />\n    <application|' "$MANIFEST"
           fi
-          # Enable cleartext traffic
           if ! grep -q "usesCleartextTraffic" "$MANIFEST"; then
             sed -i 's|<application|<application android:usesCleartextTraffic="true"|' "$MANIFEST"
           fi
